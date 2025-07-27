@@ -7,6 +7,9 @@ function App() {
   const [input, setInput] = useState('')
   const messagesEndRef = useRef(null)
 
+  // Create unique session ID for this browser session
+  const sessionId = useRef(`user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`).current
+
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -63,7 +66,8 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          question: currentInput
+          question: currentInput,
+          session_id: sessionId  // Unique session ID
           // conversation_context removed - graph handles memory automatically
         }),
       })
@@ -341,7 +345,22 @@ function App() {
                          )}
 
                          {/* Show thinking process */}
-                        
+                         {message.thinking && message.showThinking && (
+                           <div className="mb-4 p-3 bg-gray-800/50 rounded-lg border border-gray-700/50">
+                             <div className="flex items-center space-x-2 mb-2">
+                               <div className="flex space-x-1">
+                                 <div className="w-2 h-2 bg-blue-400/60 rounded-full animate-pulse"></div>
+                                 <div className="w-2 h-2 bg-blue-400/60 rounded-full animate-pulse" style={{animationDelay: '0.1s'}}></div>
+                                 <div className="w-2 h-2 bg-blue-400/60 rounded-full animate-pulse" style={{animationDelay: '0.2s'}}></div>
+                               </div>
+                               <span className="text-sm text-blue-400/70 font-medium">Thinking...</span>
+                             </div>
+                             <div className="text-gray-400/60 text-sm leading-relaxed font-mono">
+                               {message.thinking}
+                               <span className="inline-block w-2 h-4 bg-gray-400/60 ml-1 animate-pulse"></span>
+                             </div>
+                           </div>
+                         )}
 
                          {/* Message content */}
                          {message.content && (

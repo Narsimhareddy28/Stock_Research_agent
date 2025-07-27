@@ -213,23 +213,23 @@ Question: {question}
   print(llm_response)
   
   if stream:
-      # Return generator for streaming
-      def stream_generator():
-          for chunk in llm_response:
-              if chunk.content:
-                  print(chunk.content)
-                  yield chunk.content
-      return stream_generator()
-  else:
-      # Accumulate all chunks for non-streaming
-      full_response = ""
+    # Return generator for streaming
+    def stream_generator():
       for chunk in llm_response:
-          if chunk.content:
-              full_response += chunk.content
-  return {
-          "answer": full_response,
-          "messages": messages + [AIMessage(content=full_response)]
-      }
+        if chunk.content:
+          print(chunk.content)
+          yield chunk.content
+    return stream_generator()
+  else:
+    # Accumulate all chunks for non-streaming
+    full_response = ""
+    for chunk in llm_response:
+      if chunk.content:
+        full_response += chunk.content
+    return {
+      "answer": full_response,
+      "messages": messages + [AIMessage(content=full_response)]
+    }
 
 # EXACT COPY of route_based_on_search function from research.py
 def route_based_on_search(state) -> str:
@@ -345,6 +345,7 @@ app.add_middleware(
 # FastAPI Pydantic models
 class QuestionRequest(FastAPIBaseModel):
     question: str
+    session_id: str = "default_session"  # Add session_id for unique memory per user
     # conversation_context removed - graph handles memory automatically with MemorySaver
 
 class StockAnalysisResponse(FastAPIBaseModel):
@@ -389,8 +390,8 @@ async def analyze_stock_stream(request: QuestionRequest):
                 # Small delay to ensure frontend connects
                 await asyncio.sleep(0.1)
                 
-                # Use same config as regular endpoint - graph handles memory automatically  
-                config = {"configurable": {"thread_id": "stock_session"}}
+                # Use EXACT same config as original - graph handles memory automatically
+                config = {"configurable": {"thread_id": f"stock_session_{request.session_id}"}}
                 # print(f"🔍 API Processing: '{question}'")  # Debug removed
                 
                 # Get the workflow state up to generate_answer, then stream the final response
@@ -398,30 +399,53 @@ async def analyze_stock_stream(request: QuestionRequest):
                 needs_search = False
                 context = []
                 
+                # Send thinking start event
+                yield f"data: {json.dumps({'type': 'thinking_start'})}\n\n"
+                await asyncio.sleep(0.1)
+                
                 # Process through the graph until we reach generate_answer
                 for chunk in graph.stream({"question": question}, config=config):
                     for node_name, node_output in chunk.items():
                         if node_name == "check":
+                            # Send thinking event for classification
+                            yield f"data: {json.dumps({'type': 'thinking', 'content': 'Analyzing question '})}\n\n"
+                            await asyncio.sleep(0.1)
+                            
                             needs_search = node_output.get("needs_search", False)
                             yield f"data: {json.dumps({'type': 'metadata', 'needs_search': needs_search})}\n\n"
                             await asyncio.sleep(0.1)
                             
                         elif node_name == "search_web":
+                            # Send thinking event for web search
+                            yield f"data: {json.dumps({'type': 'thinking', 'content': 'Searching for current market data and financial information...'})}\n\n"
+                            await asyncio.sleep(0.1)
+                            
                             yield f"data: {json.dumps({'type': 'status', 'content': 'Fetching live market data...'})}\n\n"
                             await asyncio.sleep(0.1)
                             if "context" in node_output:
                                 context.extend(node_output["context"])
-                            
+                    
                         elif node_name == "search_wikipedia":
+                            # Send thinking event for Wikipedia search
+                            yield f"data: {json.dumps({'type': 'thinking', 'content': 'Gathering additional background information and company details...'})}\n\n"
+                            await asyncio.sleep(0.1)
+                            
                             yield f"data: {json.dumps({'type': 'status', 'content': 'Searching additional sources...'})}\n\n"
                             await asyncio.sleep(0.1)
                             if "context" in node_output:
                                 context.extend(node_output["context"])
-                            
+                    
                         elif node_name == "generate_answer":
-                            yield f"data: {json.dumps({'type': 'status', 'content': 'Generating...'})}\n\n"
+                            # Send thinking event for answer generation
+                            if needs_search:
+                                yield f"data: {json.dumps({'type': 'thinking', 'content': 'Processing gathered information and generating comprehensive analysis...'})}\n\n"
+                            else:
+                                yield f"data: {json.dumps({'type': 'thinking', 'content': 'Analyzing conversation context and generating response...'})}\n\n"
                             await asyncio.sleep(0.1)
                             
+                            yield f"data: {json.dumps({'type': 'status', 'content': 'Generating...'})}\n\n"
+                            await asyncio.sleep(0.1)
+                
                             # Now use the REAL streaming from generate_ans
                             state = {
                                 "question": question,
@@ -429,10 +453,14 @@ async def analyze_stock_stream(request: QuestionRequest):
                                 "needs_search": needs_search,
                                 "messages": node_output.get("messages", [])
                             }
-                            
+                
                             # Get the streaming generator from generate_ans
                             stream_generator = generate_ans(state, stream=True)
-                            
+                
+                            # Send thinking end event before starting content
+                            yield f"data: {json.dumps({'type': 'thinking_end'})}\n\n"
+                            await asyncio.sleep(0.1)
+                
                             # Stream each chunk as it comes with proper async yielding
                             for chunk_content in stream_generator:
                                 full_response += chunk_content
