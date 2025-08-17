@@ -32,6 +32,11 @@ from langgraph.graph import START, MessagesState, StateGraph
 from pydantic import BaseModel, Field
 import operator
 from typing import Annotated
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_community.document_loaders import WikipediaLoader
+
+
+
 
 # EXACT COPY of SearchDecision from research.py
 class SearchDecision(BaseModel):
@@ -48,7 +53,6 @@ class Researchstate(MessagesState):
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.messages import AIMessage
-
 # EXACT COPY of search_classifier_prompt from research.py
 search_classifier_prompt = [
     SystemMessage(content="""
@@ -76,21 +80,24 @@ If the question is about:
 Remember: For current market analysis, we almost always need fresh, live data from external sources.
 """)
 ]
-
+#first node in the graph
 # EXACT COPY of check function from research.py
 def check(state):
   question = state["question"]
   decision_model = llm.with_structured_output(SearchDecision)
   decision = decision_model.invoke(search_classifier_prompt + [HumanMessage(content=question)])
   return {"needs_search": decision.needs_search,
-          "messages": state["messages"]}
+          "messages": state["messages"] }
+
+
 
 import os
-os.environ["TAVILY_API_KEY"] = "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"
+os.environ["TAVILY_API_KEY"] = os.getenv("TAVILY_API_KEY")
 
-from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain_community.document_loaders import WikipediaLoader
+
 tavily_search = TavilySearchResults(max_results=3)
+
+#second node in the graph
 
 # EXACT COPY of search_web function from research.py
 def search_web(state):
@@ -129,6 +136,8 @@ def search_wiki(state):
     )
   return {"context":[formatted_search_docs]}
 
+
+#last node in the graph
 # Modified generate_ans function with streaming support
 def generate_ans(state, stream=False):
   """node to answer a question """
@@ -183,9 +192,13 @@ IMPORTANT: Adapt your response based on the question type:
 
 Provide an appropriate response matching the question's complexity and scope.
 """)
-    messages = messages+[system_message]
-    final_messages = [system_message, HumanMessage(content=question)]
-    
+    messages = messages + [HumanMessage(content=question)]
+
+# Always prepend the system instruction before sending to LLM
+    final_messages = [system_message] + messages
+    for message in final_messages:
+        print(message.pretty_print())
+
   else:
     if not stream:
         print("💬 Using previous stock discussion...")
@@ -231,6 +244,7 @@ Question: {question}
       "messages": messages + [AIMessage(content=full_response)]
     }
 
+    
 # EXACT COPY of route_based_on_search function from research.py
 def route_based_on_search(state) -> str:
     if state.get("needs_search"):
@@ -382,6 +396,9 @@ async def analyze_stock_stream(request: QuestionRequest):
         if not question:
             raise HTTPException(status_code=400, detail="Question cannot be empty")
         
+        # Check user token limit before processing
+     
+        
         async def generate_stream():
             try:
                 # Send initial status
@@ -447,26 +464,34 @@ async def analyze_stock_stream(request: QuestionRequest):
                             await asyncio.sleep(0.1)
                 
                             # Now use the REAL streaming from generate_ans
-                            state = {
-                                "question": question,
-                                "context": context,
-                                "needs_search": needs_search,
-                                "messages": node_output.get("messages", [])
-                            }
+                            # state = {
+                            #     "question": question,
+                            #     "context": context,
+                            #     "needs_search": needs_search,
+                            #     "messages": node_output.get("messages", [])
+                            # }
                 
                             # Get the streaming generator from generate_ans
-                            stream_generator = generate_ans(state, stream=True)
+                            # stream_generator = generate_ans(state, stream=True)
                 
                             # Send thinking end event before starting content
                             yield f"data: {json.dumps({'type': 'thinking_end'})}\n\n"
                             await asyncio.sleep(0.1)
+                            final_text = node_output.get("answer", "")
+
+                            # Stream the text character by character to preserve formatting
+                            for char in final_text:
+                                full_response += char
+                                yield f"data: {json.dumps({'type': 'content', 'content': char})}\n\n"
+                                await asyncio.sleep(0.005)  # Faster streaming for better UX
                 
-                            # Stream each chunk as it comes with proper async yielding
-                            for chunk_content in stream_generator:
-                                full_response += chunk_content
-                                yield f"data: {json.dumps({'type': 'content', 'content': chunk_content})}\n\n"
-                                # Small delay to prevent buffering and ensure real-time streaming
-                                await asyncio.sleep(0.01)
+                
+                            # # Stream each chunk as it comes with proper async yielding
+                            # for chunk_content in stream_generator:
+                            #     full_response += chunk_content
+                            #     yield f"data: {json.dumps({'type': 'content', 'content': chunk_content})}\n\n"
+                            #     # Small delay to prevent buffering and ensure real-time streaming
+                            #     await asyncio.sleep(0.01)
                 
                 # Extract sources from final response
                 sources = extract_sources_from_answer(full_response)
