@@ -5,25 +5,81 @@ function App() {
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(false)
   const [input, setInput] = useState('')
+  const [sessions, setSessions] = useState([])
+  const [currentSessionId, setCurrentSessionId] = useState(`user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`)
   const messagesEndRef = useRef(null)
-
-  // Create unique session ID for this browser session
-  const sessionId = useRef(`user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`).current
 
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages, loading])
 
-  // Load messages from localStorage
+  // Load messages from database for current session
   useEffect(() => {
-    const savedMessages = localStorage.getItem('stockChatMessages')
-    if (savedMessages) {
-      setMessages(JSON.parse(savedMessages))
+    const loadSessionMessages = async () => {
+      try {
+        const response = await fetch(`http://localhost:8000/sessions/${currentSessionId}`)
+        if (response.ok) {
+          const data = await response.json()
+          if (data.messages && data.messages.length > 0) {
+            // Convert database messages to frontend format
+            const convertedMessages = data.messages.map(msg => ({
+              id: msg.id,
+              type: msg.type,
+              content: msg.content,
+              timestamp: msg.timestamp,
+              sources: msg.sources && msg.sources.length > 0 ? msg.sources
+                .filter(url => url && url.trim()) // Filter out empty URLs
+                .map((url, i) => {
+                  try {
+                    return {
+                      id: i + 1,
+                      url: url,
+                      title: new URL(url).hostname,
+                      display: `Source ${i + 1}: ${new URL(url).hostname}`
+                    }
+                  } catch (error) {
+                    console.warn('Invalid URL from database:', url)
+                    return null
+                  }
+                })
+                .filter(source => source !== null) : [], // Remove null sources
+              metadata: msg.metadata
+            }))
+            setMessages(convertedMessages)
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to load session from database:', error)
+        // Fallback to localStorage if database fails
+        const savedMessages = localStorage.getItem('stockChatMessages')
+        if (savedMessages) {
+          setMessages(JSON.parse(savedMessages))
+        }
+      }
     }
+
+    loadSessionMessages()
+  }, [currentSessionId])
+
+  // Load all sessions
+  useEffect(() => {
+    const loadSessions = async () => {
+      try {
+        const response = await fetch('http://localhost:8000/sessions')
+        if (response.ok) {
+          const data = await response.json()
+          setSessions(data.sessions || [])
+        }
+      } catch (error) {
+        console.warn('Failed to load sessions:', error)
+      }
+    }
+
+    loadSessions()
   }, [])
 
-  // Save messages to localStorage
+  // Save messages to localStorage (fallback)
   useEffect(() => {
     if (messages.length > 0) {
       localStorage.setItem('stockChatMessages', JSON.stringify(messages))
@@ -67,7 +123,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           question: currentInput,
-          session_id: sessionId  // Unique session ID
+          session_id: currentSessionId  // Current session ID
           // conversation_context removed - graph handles memory automatically
         }),
       })
@@ -253,17 +309,37 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-900 text-white">
-      {/* Simple Header */}
-      <header className=" px-6 py-4">
+      {/* Header with Session Management */}
+      <header className="px-6 py-4">
         <div className="flex items-center justify-between max-w-6xl mx-auto">
           <div className="flex items-center space-x-2">
             <span className="text-2xl">📈</span>
             <span className="text-xl font-bold">Stock Research AI</span>
           </div>
           <div className="flex items-center space-x-4">
+            {/* Session Selector */}
+            <div className="flex items-center space-x-2">
+              <select
+                value={currentSessionId}
+                onChange={(e) => {
+                  setCurrentSessionId(e.target.value)
+                  setMessages([]) // Clear current messages
+                }}
+                className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1 text-sm text-white"
+              >
+                <option value={currentSessionId}>Current Session</option>
+                {sessions.map((session) => (
+                  <option key={session.session_id} value={session.session_id}>
+                    {session.session_id} ({session.message_count} messages)
+                  </option>
+                ))}
+              </select>
+            </div>
+            
             <span className="text-sm text-gray-400">
               {messages.length > 0 ? `${messages.length} messages` : 'Ready'}
             </span>
+            
             {messages.length > 0 && (
               <button
                 onClick={() => {
@@ -378,17 +454,28 @@ function App() {
                            <div className="mt-4 pt-3 border-t border-gray-700">
                              <div className="text-sm text-gray-400 mb-2">📚 Sources:</div>
                              <div className="space-y-1">
-                               {message.sources.slice(0, 3).map((url, i) => (
-                                 <a
-                                   key={i}
-                                   href={url}
-                                   target="_blank"
-                                   rel="noopener noreferrer"
-                                   className="block text-blue-400 hover:text-blue-300 text-sm truncate"
-                                 >
-                                   {new URL(url).hostname}
-                                 </a>
-                               ))}
+                               {message.sources.slice(0, 3).map((source, i) => {
+                                 // Handle both new structured format and old string format
+                                 const url = typeof source === 'string' ? source : source.url;
+                                 const display = typeof source === 'string' ? new URL(url).hostname : source.display;
+                                 
+                                 try {
+                                   return (
+                                     <a
+                                       key={i}
+                                       href={url}
+                                       target="_blank"
+                                       rel="noopener noreferrer"
+                                       className="block text-blue-400 hover:text-blue-300 text-sm truncate"
+                                     >
+                                       {display}
+                                     </a>
+                                   );
+                                 } catch (error) {
+                                   console.warn('Invalid URL:', url);
+                                   return null;
+                                 }
+                               })}
                              </div>
                            </div>
                          )}
@@ -398,17 +485,24 @@ function App() {
                            <div className="mt-4 pt-3 border-t border-gray-700">
                              <div className="text-sm text-gray-400 mb-2">📚 Sources:</div>
                              <div className="space-y-1">
-                               {extractSources(message.content).slice(0, 3).map((url, i) => (
-                                 <a
-                                   key={i}
-                                   href={url}
-                                   target="_blank"
-                                   rel="noopener noreferrer"
-                                   className="block text-blue-400 hover:text-blue-300 text-sm truncate"
-                                 >
-                                   {new URL(url).hostname}
-                                 </a>
-                               ))}
+                               {extractSources(message.content).slice(0, 3).map((url, i) => {
+                                 try {
+                                   return (
+                                     <a
+                                       key={i}
+                                       href={url}
+                                       target="_blank"
+                                       rel="noopener noreferrer"
+                                       className="block text-blue-400 hover:text-blue-300 text-sm truncate"
+                                     >
+                                       {new URL(url).hostname}
+                                     </a>
+                                   );
+                                 } catch (error) {
+                                   console.warn('Invalid URL:', url);
+                                   return null;
+                                 }
+                               })}
                              </div>
                            </div>
                          )}
